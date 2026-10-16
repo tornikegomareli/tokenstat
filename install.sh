@@ -16,7 +16,7 @@ fail() {
 os=$(uname -s | tr '[:upper:]' '[:lower:]')
 case "$os" in
 darwin | linux) ;;
-*) fail "$os is not supported. Releases exist for macOS and Linux." ;;
+*) fail "$os is not supported here. On Windows, use install.ps1 from PowerShell." ;;
 esac
 
 case "$(uname -m)" in
@@ -47,8 +47,38 @@ mv "$tmp/tokenstat" "$dir/tokenstat"
 chmod 755 "$dir/tokenstat"
 echo "Installed tokenstat to $dir/tokenstat"
 
+# Now that the new one is in place, remove other copies on the PATH, such
+# as ~/go/bin/tokenstat from go install: one that comes first would run
+# instead. Relative PATH entries depend on the current folder, and symlinks
+# usually belong to a package manager, so those are only reported.
+real_dir=$(cd "$dir" && pwd -P)
+set -f
+old_ifs=$IFS
+IFS=:
+for p in $PATH; do
+	case "$p" in
+	/*) ;;
+	*) continue ;;
+	esac
+	f="$p/tokenstat"
+	[ -f "$f" ] || continue
+	real_p=$(cd "$p" 2>/dev/null && pwd -P) || continue
+	[ "$real_p" = "$real_dir" ] && continue
+	if [ -L "$f" ]; then
+		echo "Another tokenstat is on your PATH: $f (a link, maybe from a package manager). Remove it if it is an old one."
+	elif rm -f "$f" 2>/dev/null && [ ! -e "$f" ]; then
+		echo "Removed another tokenstat: $f"
+	else
+		echo "Could not remove another tokenstat: $f
+It may run instead of this one. Remove it with: sudo rm \"$f\""
+	fi
+done
+IFS=$old_ifs
+set +f
+
 case ":$PATH:" in
-*":$dir:"*) echo "Run: tokenstat" ;;
+*":$dir:"* | *":$dir/:"*)
+	echo "Run: tokenstat (open a new terminal if an old one still starts)" ;;
 *) echo "$dir is not on your PATH. Add it, then run tokenstat:
   export PATH=\"$dir:\$PATH\"" ;;
 esac

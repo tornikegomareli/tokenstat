@@ -1,4 +1,4 @@
-// tokenstat shows Claude Code and Codex token usage from the local session logs.
+// tokenstat shows Claude Code, Codex, and Copilot CLI token usage from the local session logs.
 package main
 
 import (
@@ -18,6 +18,13 @@ import (
 )
 
 func main() {
+	if ran, err := runCommand(os.Args[1:]); ran {
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "tokenstat:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if _, err := tea.NewProgram(newModel(), tea.WithAltScreen()).Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "tokenstat:", err)
 		os.Exit(1)
@@ -32,7 +39,7 @@ type data struct {
 	failed  int               // files that could not be read
 }
 
-// load reads every Claude Code and Codex session log.
+// load reads every Claude Code, Codex, Copilot CLI, and VS Code Copilot Chat session log.
 func load() data {
 	home, _ := os.UserHomeDir()
 	codexHome := os.Getenv("CODEX_HOME")
@@ -41,13 +48,15 @@ func load() data {
 	}
 	claude, failedClaude := scan(findJSONL(filepath.Join(home, ".claude", "projects"), filepath.Join(home, ".config", "claude", "projects")), parseClaude)
 	codex, failedCodex := scan(findJSONL(filepath.Join(codexHome, "sessions"), filepath.Join(codexHome, "archived_sessions")), parseCodex)
+	copilot, failedCopilot := scan(findJSONL(filepath.Join(home, ".copilot", "session-state")), parseCopilot)
+	vscode, failedVSCode := scan(findChatSessions(vscodeRoots()...), parseVSCode)
 
 	var d data
-	d.failed = failedClaude + failedCodex
+	d.failed = failedClaude + failedCodex + failedCopilot + failedVSCode
 	titleByID := codexTitles(filepath.Join(codexHome, "session_index.jsonl"))
-	var recs [2][]record // by Tool
+	var recs [numTools][]record
 	var outputs []Output
-	for _, files := range []map[string]fileData{claude, codex} {
+	for _, files := range []map[string]fileData{claude, codex, copilot, vscode} {
 		for _, fd := range files {
 			if fd.title != "" {
 				titleByID[fd.id] = fd.title
@@ -59,7 +68,7 @@ func load() data {
 		}
 	}
 	d.titles = map[string]string{}
-	for _, files := range []map[string]fileData{claude, codex} {
+	for _, files := range []map[string]fileData{claude, codex, copilot, vscode} {
 		for path, fd := range files {
 			title := titleByID[fd.id]
 			if title == "" {
@@ -72,15 +81,17 @@ func load() data {
 		}
 	}
 
-	d.usage = append(dedupe(recs[Claude]), dedupe(recs[Codex])...)
+	d.usage = append(append(dedupe(recs[Claude]), dedupe(recs[Codex])...), dedupe(recs[Copilot])...)
+	// Projects use / on every system, so Windows paths shorten like the others.
+	home = filepath.ToSlash(home)
 	for i := range d.usage {
 		d.usage[i].Time = d.usage[i].Time.Local()
-		d.usage[i].Project = tilde(d.usage[i].Project, home)
+		d.usage[i].Project = tilde(filepath.ToSlash(d.usage[i].Project), home)
 	}
 	d.outputs = dedupeOutputs(outputs)
 	for i := range d.outputs {
 		d.outputs[i].Time = d.outputs[i].Time.Local()
-		d.outputs[i].Project = tilde(d.outputs[i].Project, home)
+		d.outputs[i].Project = tilde(filepath.ToSlash(d.outputs[i].Project), home)
 		d.outputs[i].Detail = strings.ReplaceAll(d.outputs[i].Detail, home, "~")
 	}
 	setLimitPoints(d.usage)

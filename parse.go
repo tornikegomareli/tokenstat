@@ -16,6 +16,8 @@ type Tool int
 const (
 	Claude Tool = iota
 	Codex
+	Copilot
+	numTools
 )
 
 // Tokens are the token counts of one model call.
@@ -46,6 +48,7 @@ type Usage struct {
 	Cache1h int64         // cache writes with the 1-hour lifetime (Claude Code)
 	Limit   *Limit        // Codex plan limits after the call
 	Points  float64       // weekly limit percent this call used (set by load)
+	Calls   int           // model calls this record stands for; 0 means one (Copilot sums several)
 }
 
 // Limit is a snapshot of the Codex plan limits.

@@ -51,7 +51,7 @@ func (m model) listLen() int {
 		return dayCount(m.f.from, m.f.to)
 	case advSessions:
 		used, _ := m.used()
-		return len(sessions(used))
+		return len(sessions(perCall(used)))
 	}
 	return 0
 }
@@ -64,7 +64,7 @@ func (m *model) open() {
 		m.screen, m.sel = menu[m.sel].screen, 0
 		if m.screen == advSpikes {
 			used, _ := m.used()
-			days := dayTotals(used, m.f.from, m.f.to)
+			days := dayTotals(perCall(used), m.f.from, m.f.to)
 			for i, d := range days {
 				if d.tokens > days[m.sel].tokens {
 					m.sel = i
@@ -73,7 +73,7 @@ func (m *model) open() {
 		}
 	case advSessions:
 		used, _ := m.used()
-		if list := sessions(used); m.sel < len(list) {
+		if list := sessions(perCall(used)); m.sel < len(list) {
 			m.session, m.screen = list[m.sel].key, advTimeline
 		}
 	}
@@ -113,7 +113,23 @@ func marker(selected bool, row string) string {
 	return "  " + row
 }
 
+// perCall drops Copilot usage: Copilot logs one total per session, not the
+// calls that the spike, session, timeline, and drift views look at.
+func perCall(used []Usage) []Usage {
+	var out []Usage
+	for _, u := range used {
+		if u.Tool != Copilot {
+			out = append(out, u)
+		}
+	}
+	return out
+}
+
 func (m model) advancedView(used []Usage, outputs []Output, w, rows int) []string {
+	switch m.screen {
+	case advSpikes, advSessions, advTimeline, advDrift:
+		used = perCall(used)
+	}
 	switch m.screen {
 	case advMenu:
 		return m.menuView(w)
@@ -299,7 +315,7 @@ func rentView(outputs []Output, w, rows int) []string {
 	}
 	tools := ranked(byTool)
 	toolRows := max(1, min(len(tools), 5))
-	lines := table("Context rent by tool", "Tool", tools, toolRows, total.sum(), w)
+	lines := table("Context rent by tool", "Tool", tools, toolRows, total.sum(), []Tool{Claude, Codex}, w)
 
 	sorted := append([]Output(nil), outputs...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Rent() > sorted[j].Rent() })

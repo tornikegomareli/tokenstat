@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -57,6 +59,48 @@ type model struct {
 	screen        screen
 	sel           int    // selected row on an Advanced screen
 	session       string // session that the timeline shows
+	submitting    bool   // the s key is logging in or sending, and waits for the reply
+	status        string // what the s key is doing or did, shown in the footer until the next key
+	statusErr     bool
+	login         string // GitHub login of the leaderboard account, "" when logged out
+	loginTried    bool   // this s press already ran a login, so do not loop
+	cancelLogin   func() // stops the wait for GitHub; nil when not waiting
+	loginGen      int    // counts cancels, so a cancelled login's reply is dropped
+}
+
+// The s key logs in first when there is no login, then submits. Each step
+// runs as a command and replies with one of these.
+type (
+	loginStartedMsg struct {
+		code deviceCode
+		err  error
+	}
+	loggedInMsg struct {
+		gen   int
+		login string
+		err   error
+	}
+	submittedMsg struct {
+		text string
+		err  error
+	}
+)
+
+func submitCmd(usage []Usage) tea.Cmd {
+	return func() tea.Msg {
+		text, err := submit(usage, defaultSubmitDays, "")
+		return submittedMsg{text, err}
+	}
+}
+
+func startLoginCmd() tea.Msg {
+	code, err := startLogin("")
+	return loginStartedMsg{code, err}
+}
+
+// fail ends the s key's work with an error in the footer.
+func (m *model) fail(err error) {
+	m.submitting, m.status, m.statusErr = false, err.Error(), true
 }
 
 // used returns the usage and the tool outputs that the filters keep.
@@ -104,16 +148,66 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 	case loadedMsg:
 		m.data, m.loaded = data(msg), true
+		if c, err := readCredentials(); err == nil {
+			m.login = c.Login
+		}
+	case loginStartedMsg:
+		if msg.err != nil {
+			m.fail(msg.err)
+			break
+		}
+		m.status = fmt.Sprintf("Enter %s at %s · esc to cancel", msg.code.UserCode, msg.code.VerificationURI)
+		ctx, cancel := context.WithCancel(context.Background())
+		code, gen := msg.code, m.loginGen
+		m.cancelLogin = cancel
+		return m, func() tea.Msg {
+			login, err := finishLogin(ctx, code)
+			return loggedInMsg{gen, login, err}
+		}
+	case loggedInMsg:
+		if msg.gen != m.loginGen {
+			break // cancelled with esc
+		}
+		m.cancelLogin = nil
+		if msg.err != nil {
+			m.fail(msg.err)
+			break
+		}
+		m.login, m.status = msg.login, "Logged in as "+msg.login+". Sending your daily totals to the leaderboard…"
+		return m, submitCmd(m.usage)
+	case submittedMsg:
+		if errors.Is(msg.err, errNotLoggedIn) && !m.loginTried {
+			// No login yet, or the server no longer takes it: log in, then
+			// send again.
+			m.loginTried, m.login = true, ""
+			m.status = "Not logged in. Starting the GitHub login…"
+			return m, startLoginCmd
+		}
+		if msg.err != nil {
+			m.fail(msg.err)
+			break
+		}
+		m.submitting, m.status, m.statusErr = false, msg.text, false
 	case tea.KeyMsg:
 		if msg.Type == tea.KeyCtrlC {
 			return m, tea.Quit
 		}
+		if msg.Type == tea.KeyEsc && m.cancelLogin != nil {
+			m.cancelLogin()
+			m.cancelLogin, m.loginGen = nil, m.loginGen+1
+			m.submitting, m.status, m.statusErr = false, "Login cancelled.", false
+			return m, nil
+		}
+		if !m.submitting {
+			m.status = ""
+		}
+		var cmd tea.Cmd
 		switch m.mode {
 		case browsing:
 			if msg.String() == "q" {
 				return m, tea.Quit
 			}
-			m.browse(msg)
+			cmd = m.browse(msg)
 		case typingRange:
 			m.typeRange(msg)
 		default:
@@ -121,22 +215,34 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// A filter can shrink the list, so keep the selection on it.
 		m.sel = max(0, min(m.sel, m.listLen()-1))
+		return m, cmd
 	}
 	return m, nil
 }
 
-func (m *model) browse(k tea.KeyMsg) {
+func (m *model) browse(k tea.KeyMsg) tea.Cmd {
 	switch k.String() {
+	case "s":
+		if !m.loaded || m.submitting {
+			return nil
+		}
+		m.submitting, m.loginTried = true, false
+		m.status, m.statusErr = "Sending your daily totals to the leaderboard…", false
+		return submitCmd(m.usage)
 	case "d":
 		m.setPreset((m.preset+1)%len(presets), time.Now())
 	case "c":
 		m.mode, m.inputErr = typingRange, ""
 		m.input = m.f.from.Format(dateFmt) + " " + m.f.to.Format(dateFmt)
 	case "t":
-		m.f.tool++
-		if m.f.tool > int(Codex) {
-			m.f.tool = -1
+		next := -1 // after the last tool, all tools
+		for _, t := range toolsIn(m.usage) {
+			if int(t) > m.f.tool {
+				next = int(t)
+				break
+			}
 		}
+		m.f.tool = next
 	case "p":
 		m.mode, m.input, m.cursor = pickingProject, "", 0
 	case "m":
@@ -159,6 +265,7 @@ func (m *model) browse(k tea.KeyMsg) {
 	case "down":
 		m.sel++
 	}
+	return nil
 }
 
 // edit applies a key to the text input. It reports whether the text changed.
